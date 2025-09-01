@@ -48,7 +48,7 @@ func (s *colorSwatch) Tapped(_ *fyne.PointEvent) {
 func NewToolbar(board *BoardWidget) fyne.CanvasObject {
 	// toolbar with built-in tooltips
 	tb := widget.NewToolbar(
-		widget.NewToolbarAction(theme.ConfirmIcon(), func() {
+		widget.NewToolbarAction(theme.DocumentCreateIcon(), func() {
 			board.SetColor(lastSelectedColor)
 			if board.currentStroke > 10.0 {
 				board.SetStroke(2.0)
