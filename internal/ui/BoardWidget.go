@@ -1,25 +1,25 @@
 package ui
 
 import (
+	"fmt"
 	"image/color"
 	"log"
 	"sync"
 	"time"
-	"fmt"
 
 	"fyne.io/fyne/v2"
 	"fyne.io/fyne/v2/canvas"
-	// "fyne.io/fyne/v2/container"
 	"fyne.io/fyne/v2/driver/desktop"
 	"fyne.io/fyne/v2/widget"
 )
 
-// Path struct now uses a string for color for network safety.
+// Path struct now includes an OwnerID
 type Path struct {
-	ID     string          `json:"id"`
-	Points []fyne.Position `json:"points"`
-	Color  string          `json:"color"`
-	Stroke float32         `json:"stroke"`
+	ID      string          `json:"id"`
+	OwnerID string          `json:"owner_id"` // The ID of the user who drew this
+	Points  []fyne.Position `json:"points"`
+	Color   string          `json:"color"`
+	Stroke  float32         `json:"stroke"`
 }
 
 type BoardWidget struct {
@@ -31,11 +31,13 @@ type BoardWidget struct {
 	drawing         bool
 	currentColor    string
 	currentStroke   float32
+	LocalClientID   string // The ID of the person using this specific window
 	OnNewPath       func(p Path)
-	// Channels for safe, concurrent UI updates
+	OnClear         func()
 	remotePathsChan chan Path
+	clearChan       chan string // Now carries the OwnerID to clear
 	statusChan      chan string
-	statusBar       *widget.Label // Reference to the status bar
+	statusBar       *widget.Label
 }
 
 var _ fyne.Widget = (*BoardWidget)(nil)
@@ -48,34 +50,65 @@ func NewBoardWidget() *BoardWidget {
 		currentColor:    "black",
 		currentStroke:   3.0,
 		remotePathsChan: make(chan Path, 100),
+		clearChan:       make(chan string, 10),
 		statusChan:      make(chan string, 10),
-		statusBar:       widget.NewLabel("Ready"), // Create the status bar here
+		statusBar:       widget.NewLabel("Ready"),
 	}
 	b.ExtendBaseWidget(b)
-	go b.listenForRemotePaths()
+	go b.listenForUpdates()
 	return b
 }
 
-func (b *BoardWidget) listenForRemotePaths() {
-	for path := range b.remotePathsChan {
-		b.mu.Lock()
-		b.paths = append(b.paths, &path)
-		b.mu.Unlock()
-		b.Refresh()
-		log.Println("[UI] Safely added remote path and refreshed.")
+func (b *BoardWidget) listenForUpdates() {
+	for {
+		select {
+		case path := <-b.remotePathsChan:
+			b.mu.Lock(); b.paths = append(b.paths, &path); b.mu.Unlock()
+			b.Refresh()
+		case ownerToClear := <-b.clearChan:
+			b.clearPathsByOwner(ownerToClear) // Call the new selective clear
+			log.Printf("[UI] Safely cleared paths for owner %s.", ownerToClear)
+		case text := <-b.statusChan:
+			b.statusBar.SetText(text)
+		}
 	}
 }
 
-// AddRemotePath is a thread-safe way to add a path from the network.
-func (b *BoardWidget) AddRemotePath(p Path) {
-	b.remotePathsChan <- p
+// SetLocalClientID gives the board its own identity.
+func (b *BoardWidget) SetLocalClientID(id string) {
+	b.LocalClientID = id
 }
 
-// SetStatus is a thread-safe way to update the status bar text.
-func (b *BoardWidget) SetStatus(text string) {
-	b.statusChan <- text
+// clearPathsByOwner is the new core logic for selective clearing.
+func (b *BoardWidget) clearPathsByOwner(ownerID string) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	
+	// Create a new slice, keeping only the paths that do NOT match the ownerID
+	filteredPaths := make([]*Path, 0)
+	for _, path := range b.paths {
+		if path.OwnerID != ownerID {
+			filteredPaths = append(filteredPaths, path)
+		}
+	}
+	// Replace the old list with the filtered list
+	b.paths = filteredPaths
+	b.Refresh()
 }
 
+
+func (b *BoardWidget) AddRemotePath(p Path) { b.remotePathsChan <- p }
+func (b *BoardWidget) ClearRemote(ownerID string) { b.clearChan <- ownerID }
+func (b *BoardWidget) SetStatus(text string) { b.statusChan <- text }
+
+// ClearPaths is called by the local UI button.
+func (b *BoardWidget) ClearPaths() {
+	// It clears its own paths directly and then fires the network event.
+	b.clearPathsByOwner(b.LocalClientID)
+	if b.OnClear != nil {
+		b.OnClear()
+	}
+}
 func (b *BoardWidget) SetColor(c color.Color) {
 	b.mu.Lock(); defer b.mu.Unlock()
 	switch c {
@@ -86,29 +119,23 @@ func (b *BoardWidget) SetColor(c color.Color) {
 	default: b.currentColor = "black"
 	}
 }
-func (b *BoardWidget) SetStroke(s float32) {
-	b.mu.Lock(); defer b.mu.Unlock()
-	b.currentStroke = s
-}
-func (b *BoardWidget) ClearPaths() {
-	b.mu.Lock(); defer b.mu.Unlock()
-	b.paths = make([]*Path, 0)
-	b.Refresh()
-	// TODO: Broadcast a "clear" message
-}
-
+func (b *BoardWidget) SetStroke(s float32) { b.mu.Lock(); defer b.mu.Unlock(); b.currentStroke = s }
 func (b *BoardWidget) MouseDown(e *desktop.MouseEvent) {
 	if e.Button == desktop.MouseButtonPrimary {
 		b.drawing = true; adjustedPos := fyne.NewPos(e.Position.X-b.panX, e.Position.Y-b.panY)
 		b.mu.RLock(); colorToUse := b.currentColor; strokeToUse := b.currentStroke; b.mu.RUnlock()
-		b.currentPath = &Path{ ID: fmt.Sprintf("path-%d", time.Now().UnixNano()), Points: []fyne.Position{adjustedPos}, Color: colorToUse, Stroke: strokeToUse }
+		
+		// Stamp the path with the owner's ID
+		b.currentPath = &Path{ ID: fmt.Sprintf("path-%d", time.Now().UnixNano()), OwnerID: b.LocalClientID, Points: []fyne.Position{adjustedPos}, Color: colorToUse, Stroke: strokeToUse }
 	}
 }
 func (b *BoardWidget) MouseUp(e *desktop.MouseEvent) {
 	if e.Button == desktop.MouseButtonPrimary && b.drawing {
 		b.drawing = false
 		if b.currentPath != nil && len(b.currentPath.Points) > 1 {
+			// Add the finalized path to the local list first
 			b.mu.Lock(); b.paths = append(b.paths, b.currentPath); b.mu.Unlock()
+			// Then send it over the network
 			if b.OnNewPath != nil { b.OnNewPath(*b.currentPath) }
 		}
 		b.currentPath = nil; b.Refresh()
@@ -123,8 +150,7 @@ func (b *BoardWidget) Dragged(e *fyne.DragEvent) {
 		b.panX += e.Dragged.DX; b.panY += e.Dragged.DY; b.Refresh()
 	}
 }
-
-// --- Fyne Renderer ---
+// Renderer (Unchanged)
 func (b *BoardWidget) CreateRenderer() fyne.WidgetRenderer {
 	r := &boardWidgetRenderer{board: b}; r.background = canvas.NewRectangle(color.White); return r
 }

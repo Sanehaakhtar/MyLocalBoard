@@ -10,8 +10,6 @@ import (
 	"sync"
 	"time"
 
-	// "fyne.io/fyne/v2/app"
-	// Import your own packages
 	"MyLocalBoard/internal/ui"
 )
 
@@ -20,13 +18,14 @@ const (
 	Port            = 8888
 )
 
-// NetworkMessage defines the structure for all network communication.
+// NetworkMessage now supports a "clear" operation with an OwnerID
 type NetworkMessage struct {
-	Type string    `json:"type"`
-	Path ui.Path `json:"path,omitempty"` // Use the Path struct from the ui package
+	Type    string  `json:"type"`
+	Path    ui.Path `json:"path,omitempty"`
+	OwnerID string  `json:"owner_id,omitempty"` // Used for the "clear" message
 }
 
-// ConnectionManager handles active network connections.
+// ConnectionManager handles active network connections
 type ConnectionManager struct {
 	connections map[net.Conn]bool
 	mu          sync.RWMutex
@@ -37,18 +36,24 @@ func NewConnectionManager() *ConnectionManager {
 		connections: make(map[net.Conn]bool),
 	}
 }
+
 func (cm *ConnectionManager) Add(conn net.Conn) {
-	cm.mu.Lock(); defer cm.mu.Unlock()
+	cm.mu.Lock()
+	defer cm.mu.Unlock()
 	cm.connections[conn] = true
 	log.Printf("Added connection: %s", conn.RemoteAddr().String())
 }
+
 func (cm *ConnectionManager) Remove(conn net.Conn) {
-	cm.mu.Lock(); defer cm.mu.Unlock()
+	cm.mu.Lock()
+	defer cm.mu.Unlock()
 	delete(cm.connections, conn)
 	log.Printf("Removed connection: %s", conn.RemoteAddr().String())
 }
+
 func (cm *ConnectionManager) Broadcast(data []byte, exclude net.Conn) {
-	cm.mu.RLock(); defer cm.mu.RUnlock()
+	cm.mu.RLock()
+	defer cm.mu.RUnlock()
 	dataWithNewline := append(data, '\n')
 	for conn := range cm.connections {
 		if conn != exclude {
@@ -71,20 +76,27 @@ func main() {
 func runHost() {
 	log.Println("Starting as HOST")
 	board := ui.NewBoardWidget()
+	board.SetLocalClientID("host") // The host identifies itself with a special ID
 	connManager := NewConnectionManager()
 
-	// Connect the board's drawing event to the network
+	// When the host draws a path
 	board.OnNewPath = func(p ui.Path) {
+		board.AddRemotePath(p) // Draw it locally first
 		msg := NetworkMessage{Type: "draw", Path: p}
 		data, _ := json.Marshal(msg)
-		log.Printf("[HOST] Broadcasting path with %d points", len(p.Points))
 		connManager.Broadcast(data, nil)
 	}
 
-	// Start the TCP server to listen for clients
+	// When the host clicks its "Clear" button
+	board.OnClear = func() {
+		log.Println("[HOST] Broadcasting clear message for self (owner: host).")
+		msg := NetworkMessage{Type: "clear", OwnerID: "host"}
+		data, _ := json.Marshal(msg)
+		connManager.Broadcast(data, nil)
+	}
+
 	go startHostServer(connManager, board)
 
-	// Get the share link and run the UI
 	hostIP := getLocalIP()
 	shareLink := fmt.Sprintf("%s%s:%d", CustomURLScheme, hostIP, Port)
 	ui.RunApp(shareLink, board)
@@ -92,20 +104,26 @@ func runHost() {
 
 func startHostServer(connManager *ConnectionManager, board *ui.BoardWidget) {
 	listener, err := net.Listen("tcp", fmt.Sprintf(":%d", Port))
-	if err != nil { log.Fatalf("Failed to start server: %v", err) }
+	if err != nil {
+		log.Fatalf("Failed to start server: %v", err)
+	}
 	defer listener.Close()
 	log.Printf("Host server listening on port %d", Port)
 
 	for {
 		conn, err := listener.Accept()
-		if err != nil { continue }
+		if err != nil {
+			log.Printf("Failed to accept connection: %v", err)
+			continue
+		}
 		connManager.Add(conn)
 		go handleHostConnection(conn, connManager, board)
 	}
 }
 
 func handleHostConnection(conn net.Conn, connManager *ConnectionManager, board *ui.BoardWidget) {
-	defer conn.Close(); defer connManager.Remove(conn)
+	defer conn.Close()
+	defer connManager.Remove(conn)
 	addr := conn.RemoteAddr().String()
 	decoder := json.NewDecoder(conn)
 
@@ -118,9 +136,15 @@ func handleHostConnection(conn net.Conn, connManager *ConnectionManager, board *
 
 		log.Printf("[HOST] Received '%s' from %s", msg.Type, addr)
 		if msg.Type == "draw" {
-			board.AddRemotePath(msg.Path) // This call is now safe
+			// Trust the client's path and relay it
+			board.AddRemotePath(msg.Path)
 			data, _ := json.Marshal(msg)
-			connManager.Broadcast(data, conn) // Relay to other clients
+			connManager.Broadcast(data, conn) // Relay to OTHERS
+		} else if msg.Type == "clear" {
+			// Trust the client's clear command and relay it
+			board.ClearRemote(msg.OwnerID)
+			data, _ := json.Marshal(msg)
+			connManager.Broadcast(data, conn) // Relay to OTHERS
 		}
 	}
 }
@@ -128,56 +152,75 @@ func handleHostConnection(conn net.Conn, connManager *ConnectionManager, board *
 func runClient(link string) {
 	log.Println("Starting as CLIENT")
 	board := ui.NewBoardWidget()
-
-	// We start the UI immediately and connect in the background
+	// The client's ID will be set once it connects and knows its address
 	go connectToHost(link, board)
-
 	ui.RunApp("", board)
 }
 
 func connectToHost(link string, board *ui.BoardWidget) {
 	address := strings.TrimPrefix(link, CustomURLScheme)
 	address = strings.TrimSuffix(address, "/")
-
-	// Give the UI a moment to appear before trying to connect
-	time.Sleep(500 * time.Millisecond)
+	time.Sleep(500 * time.Millisecond) // Give UI time to launch
 
 	conn, err := net.Dial("tcp", address)
 	if err != nil {
-		log.Printf("Connection failed: %v", err)
-		board.SetStatus("Connection failed!") // Update status via the board's safe method
+		board.SetStatus(fmt.Sprintf("Connection failed: %v", err))
 		return
 	}
 	defer conn.Close()
-	log.Println("Client connected successfully")
-	board.SetStatus("Connected to host")
 
-	// Now that we're connected, set up the drawing callback
+	// A client's unique ID is its full network address (IP:Port)
+	localAddr := conn.LocalAddr().String()
+	board.SetLocalClientID(localAddr)
+	board.SetStatus("Connected to host as " + localAddr)
+	log.Println("Client connected successfully as", localAddr)
+
+	encoder := json.NewEncoder(conn)
+
+	// When the client draws, it sends its drawing to the host
 	board.OnNewPath = func(p ui.Path) {
 		msg := NetworkMessage{Type: "draw", Path: p}
-		encoder := json.NewEncoder(conn)
 		if err := encoder.Encode(msg); err != nil {
 			log.Printf("Failed to send drawing: %v", err)
 		}
 	}
 
-	// Listen for incoming drawings from the host
+	// When the client clears, it sends a clear command with its own ID
+	board.OnClear = func() {
+		msg := NetworkMessage{Type: "clear", OwnerID: board.LocalClientID}
+		if err := encoder.Encode(msg); err != nil {
+			log.Printf("Failed to send clear message: %v", err)
+		}
+	}
+
+	// Listen for incoming messages from the host
 	decoder := json.NewDecoder(conn)
 	for {
 		var msg NetworkMessage
 		if err := decoder.Decode(&msg); err != nil {
-			log.Printf("Disconnected from host: %v", err)
-			board.SetStatus("Disconnected from host")
+			board.SetStatus(fmt.Sprintf("Disconnected from host: %v", err))
 			return
 		}
 
 		if msg.Type == "draw" {
-			board.AddRemotePath(msg.Path) // This is safe because of the channel in BoardWidget
+			// Don't draw our own path again, the UI handles that.
+			// Only draw paths from OTHER users.
+			if msg.Path.OwnerID != board.LocalClientID {
+				board.AddRemotePath(msg.Path)
+			}
+		} else if msg.Type == "clear" {
+			// Everyone, including the original sender, clears based on the broadcast.
+			board.ClearRemote(msg.OwnerID)
 		}
 	}
 }
 
 func getLocalIP() string {
-	conn, err := net.Dial("udp", "8.8.8.8:80"); if err != nil { return "127.0.0.1" }; defer conn.Close()
-	localAddr := conn.LocalAddr().(*net.UDPAddr); return localAddr.IP.String()
+	conn, err := net.Dial("udp", "8.8.8.8:80")
+	if err != nil {
+		return "127.0.0.1" // Fallback
+	}
+	defer conn.Close()
+	localAddr := conn.LocalAddr().(*net.UDPAddr)
+	return localAddr.IP.String()
 }

@@ -10,36 +10,28 @@ import (
 	"fyne.io/fyne/v2/widget"
 )
 
-// RunApp starts the Fyne application and builds the UI.
 func RunApp(shareLink string, board *BoardWidget) {
 	myApp := app.New()
-	// You can create a file named "Icon.png" in your project root for this to work.
-	// myApp.SetIcon(resourceIconPng)
-
 	window := myApp.NewWindow("MyLocalBoard")
 	window.Resize(fyne.NewSize(1024, 768))
 
-	// Connect the board's status channel to the status bar
 	go func() {
 		for statusText := range board.statusChan {
 			board.statusBar.SetText(statusText)
 		}
 	}()
 
-	// Set the initial status text
 	if shareLink != "" {
 		board.SetStatus("Share this link: " + shareLink)
 	} else {
 		board.SetStatus("Connecting...")
 	}
 	
-	// Create the main layout
 	content := container.NewBorder(
-		createToolbar(board), // top
-		board.statusBar,      // bottom
-		nil,                  // left
-		nil,                  // right
-		board,                // center
+		createToolbar(board),
+		board.statusBar,
+		nil, nil,
+		board,
 	)
 
 	window.SetContent(content)
@@ -60,6 +52,6 @@ func createToolbar(board *BoardWidget) *fyne.Container {
 		widget.NewButton("Medium", func() { board.SetStroke(3.0) }),
 		widget.NewButton("Thick", func() { board.SetStroke(6.0) }),
 		widget.NewSeparator(),
-		widget.NewButton("Clear", func() { board.ClearPaths() }),
+		widget.NewButton("Clear My Drawings", func() { board.ClearPaths() }),
 	)
 }
