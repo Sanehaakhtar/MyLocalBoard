@@ -1,44 +1,65 @@
 package ui
 
 import (
+	"image/color"
+	"log"
+
 	"fyne.io/fyne/v2"
 	"fyne.io/fyne/v2/app"
 	"fyne.io/fyne/v2/container"
 	"fyne.io/fyne/v2/widget"
 )
 
-// This version of RunApp does NOT take a BoardWidget argument.
-func RunApp(shareLink string, board *BoardWidget) { // The board argument is here but we will ignore it for now
+// RunApp starts the Fyne application and builds the UI.
+func RunApp(shareLink string, board *BoardWidget) {
 	myApp := app.New()
-	myWindow := myApp.NewWindow("Local Whiteboard")
-	myWindow.Resize(fyne.NewSize(1024, 768))
+	// You can create a file named "Icon.png" in your project root for this to work.
+	// myApp.SetIcon(resourceIconPng)
 
-	// We create a new, blank board every time.
-	localBoard := NewBoardWidget()
-	toolbar := NewToolbar(localBoard)
+	window := myApp.NewWindow("MyLocalBoard")
+	window.Resize(fyne.NewSize(1024, 768))
 
-	var topContent fyne.CanvasObject
+	// Connect the board's status channel to the status bar
+	go func() {
+		for statusText := range board.statusChan {
+			board.statusBar.SetText(statusText)
+		}
+	}()
+
+	// Set the initial status text
 	if shareLink != "" {
-		// We are the HOST
-		linkEntry := widget.NewEntry()
-		linkEntry.SetText(shareLink)
-		linkEntry.Disable()
-
-		copyButton := widget.NewButton("Copy", func() {
-			myWindow.Clipboard().SetContent(shareLink)
-		})
-		topContent = container.NewBorder(nil, nil, nil, copyButton, linkEntry)
+		board.SetStatus("Share this link: " + shareLink)
 	} else {
-        // We are a CLIENT
-        // This message is our confirmation on the Client side!
-        topContent = widget.NewLabel("Connection successful! You can now draw.")
-    }
-
+		board.SetStatus("Connecting...")
+	}
+	
+	// Create the main layout
 	content := container.NewBorder(
-		container.NewVBox(topContent, toolbar),
-		nil, nil, nil, localBoard,
+		createToolbar(board), // top
+		board.statusBar,      // bottom
+		nil,                  // left
+		nil,                  // right
+		board,                // center
 	)
 
-	myWindow.SetContent(content)
-	myWindow.ShowAndRun()
+	window.SetContent(content)
+	log.Println("Starting Fyne UI...")
+	window.ShowAndRun()
+}
+
+func createToolbar(board *BoardWidget) *fyne.Container {
+	return container.NewHBox(
+		widget.NewLabel("Colors:"),
+		widget.NewButton("Black", func() { board.SetColor(color.Black) }),
+		widget.NewButton("Red", func() { board.SetColor(color.RGBA{R: 255, A: 255}) }),
+		widget.NewButton("Blue", func() { board.SetColor(color.RGBA{B: 255, A: 255}) }),
+		widget.NewButton("Green", func() { board.SetColor(color.RGBA{G: 255, A: 255}) }),
+		widget.NewSeparator(),
+		widget.NewLabel("Stroke:"),
+		widget.NewButton("Thin", func() { board.SetStroke(1.0) }),
+		widget.NewButton("Medium", func() { board.SetStroke(3.0) }),
+		widget.NewButton("Thick", func() { board.SetStroke(6.0) }),
+		widget.NewSeparator(),
+		widget.NewButton("Clear", func() { board.ClearPaths() }),
+	)
 }
