@@ -63,7 +63,9 @@ func (b *BoardWidget) listenForUpdates() {
 	for {
 		select {
 		case path := <-b.remotePathsChan:
-			b.mu.Lock(); b.paths = append(b.paths, &path); b.mu.Unlock()
+			b.mu.Lock()
+			b.paths = append(b.paths, &path)
+			b.mu.Unlock()
 			b.Refresh()
 		case ownerToClear := <-b.clearChan:
 			b.clearPathsByOwner(ownerToClear) // Call the new selective clear
@@ -77,6 +79,20 @@ func (b *BoardWidget) listenForUpdates() {
 // SetLocalClientID gives the board its own identity.
 func (b *BoardWidget) SetLocalClientID(id string) {
 	b.LocalClientID = id
+}
+
+// GetAllPaths returns a copy of all current paths for state synchronization
+func (b *BoardWidget) GetAllPaths() []Path {
+	b.mu.RLock()
+	defer b.mu.RUnlock()
+	
+	paths := make([]Path, len(b.paths))
+	for i, path := range b.paths {
+		if path != nil {
+			paths[i] = *path
+		}
+	}
+	return paths
 }
 
 // clearPathsByOwner is the new core logic for selective clearing.
@@ -96,10 +112,17 @@ func (b *BoardWidget) clearPathsByOwner(ownerID string) {
 	b.Refresh()
 }
 
+func (b *BoardWidget) AddRemotePath(p Path) { 
+	b.remotePathsChan <- p 
+}
 
-func (b *BoardWidget) AddRemotePath(p Path) { b.remotePathsChan <- p }
-func (b *BoardWidget) ClearRemote(ownerID string) { b.clearChan <- ownerID }
-func (b *BoardWidget) SetStatus(text string) { b.statusChan <- text }
+func (b *BoardWidget) ClearRemote(ownerID string) { 
+	b.clearChan <- ownerID 
+}
+
+func (b *BoardWidget) SetStatus(text string) { 
+	b.statusChan <- text 
+}
 
 // ClearPaths is called by the local UI button.
 func (b *BoardWidget) ClearPaths() {
@@ -109,79 +132,155 @@ func (b *BoardWidget) ClearPaths() {
 		b.OnClear()
 	}
 }
+
 func (b *BoardWidget) SetColor(c color.Color) {
-	b.mu.Lock(); defer b.mu.Unlock()
+	b.mu.Lock()
+	defer b.mu.Unlock()
 	switch c {
-	case color.Black: b.currentColor = "black"
-	case color.RGBA{R: 255, A: 255}: b.currentColor = "red"
-	case color.RGBA{B: 255, A: 255}: b.currentColor = "blue"
-	case color.RGBA{G: 255, A: 255}: b.currentColor = "green"
-	default: b.currentColor = "black"
+	case color.Black: 
+		b.currentColor = "black"
+	case color.RGBA{R: 255, A: 255}: 
+		b.currentColor = "red"
+	case color.RGBA{B: 255, A: 255}: 
+		b.currentColor = "blue"
+	case color.RGBA{G: 255, A: 255}: 
+		b.currentColor = "green"
+	default: 
+		b.currentColor = "black"
 	}
 }
-func (b *BoardWidget) SetStroke(s float32) { b.mu.Lock(); defer b.mu.Unlock(); b.currentStroke = s }
+
+func (b *BoardWidget) SetStroke(s float32) { 
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	b.currentStroke = s 
+}
+
 func (b *BoardWidget) MouseDown(e *desktop.MouseEvent) {
 	if e.Button == desktop.MouseButtonPrimary {
-		b.drawing = true; adjustedPos := fyne.NewPos(e.Position.X-b.panX, e.Position.Y-b.panY)
-		b.mu.RLock(); colorToUse := b.currentColor; strokeToUse := b.currentStroke; b.mu.RUnlock()
+		b.drawing = true
+		adjustedPos := fyne.NewPos(e.Position.X-b.panX, e.Position.Y-b.panY)
+		
+		b.mu.RLock()
+		colorToUse := b.currentColor
+		strokeToUse := b.currentStroke
+		b.mu.RUnlock()
 		
 		// Stamp the path with the owner's ID
-		b.currentPath = &Path{ ID: fmt.Sprintf("path-%d", time.Now().UnixNano()), OwnerID: b.LocalClientID, Points: []fyne.Position{adjustedPos}, Color: colorToUse, Stroke: strokeToUse }
+		b.currentPath = &Path{
+			ID:      fmt.Sprintf("path-%d", time.Now().UnixNano()),
+			OwnerID: b.LocalClientID,
+			Points:  []fyne.Position{adjustedPos},
+			Color:   colorToUse,
+			Stroke:  strokeToUse,
+		}
 	}
 }
+
 func (b *BoardWidget) MouseUp(e *desktop.MouseEvent) {
 	if e.Button == desktop.MouseButtonPrimary && b.drawing {
 		b.drawing = false
 		if b.currentPath != nil && len(b.currentPath.Points) > 1 {
 			// Add the finalized path to the local list first
-			b.mu.Lock(); b.paths = append(b.paths, b.currentPath); b.mu.Unlock()
+			b.mu.Lock()
+			b.paths = append(b.paths, b.currentPath)
+			b.mu.Unlock()
+			
 			// Then send it over the network
-			if b.OnNewPath != nil { b.OnNewPath(*b.currentPath) }
+			if b.OnNewPath != nil {
+				b.OnNewPath(*b.currentPath)
+			}
 		}
-		b.currentPath = nil; b.Refresh()
+		b.currentPath = nil
+		b.Refresh()
 	}
 }
+
 func (b *BoardWidget) Dragged(e *fyne.DragEvent) {
 	if b.drawing && b.currentPath != nil {
 		adjustedPos := fyne.NewPos(e.Position.X-b.panX, e.Position.Y-b.panY)
 		b.currentPath.Points = append(b.currentPath.Points, adjustedPos)
 		b.Refresh()
 	} else if !b.drawing {
-		b.panX += e.Dragged.DX; b.panY += e.Dragged.DY; b.Refresh()
+		b.panX += e.Dragged.DX
+		b.panY += e.Dragged.DY
+		b.Refresh()
 	}
 }
-// Renderer (Unchanged)
+
+// Renderer implementation
 func (b *BoardWidget) CreateRenderer() fyne.WidgetRenderer {
-	r := &boardWidgetRenderer{board: b}; r.background = canvas.NewRectangle(color.White); return r
+	r := &boardWidgetRenderer{board: b}
+	r.background = canvas.NewRectangle(color.White)
+	return r
 }
-type boardWidgetRenderer struct { board *BoardWidget; background *canvas.Rectangle }
+
+type boardWidgetRenderer struct {
+	board      *BoardWidget
+	background *canvas.Rectangle
+}
+
 func (r *boardWidgetRenderer) Objects() []fyne.CanvasObject {
-    r.board.mu.RLock(); defer r.board.mu.RUnlock()
-    objects := []fyne.CanvasObject{r.background}
-    pathsToRender := make([]*Path, len(r.board.paths)); copy(pathsToRender, r.board.paths)
-    if r.board.drawing && r.board.currentPath != nil { pathsToRender = append(pathsToRender, r.board.currentPath) }
-    for _, p := range pathsToRender {
-        var pathColor color.Color = color.Black
-        if p.Color == "red" { pathColor = color.RGBA{R: 255, A: 255}
-        } else if p.Color == "blue" { pathColor = color.RGBA{B: 255, A: 255}
-        } else if p.Color == "green" { pathColor = color.RGBA{G: 255, A: 255} }
-        if len(p.Points) > 1 {
-            for i := 0; i < len(p.Points)-1; i++ {
-                segment := canvas.NewLine(pathColor); segment.StrokeWidth = p.Stroke
-                segment.Position1 = fyne.NewPos(p.Points[i].X+r.board.panX, p.Points[i].Y+r.board.panY)
-                segment.Position2 = fyne.NewPos(p.Points[i+1].X+r.board.panX, p.Points[i+1].Y+r.board.panY)
-                objects = append(objects, segment)
-            }
-        }
-    }
-    return objects
+	r.board.mu.RLock()
+	defer r.board.mu.RUnlock()
+	
+	objects := []fyne.CanvasObject{r.background}
+	pathsToRender := make([]*Path, len(r.board.paths))
+	copy(pathsToRender, r.board.paths)
+	
+	if r.board.drawing && r.board.currentPath != nil {
+		pathsToRender = append(pathsToRender, r.board.currentPath)
+	}
+	
+	for _, p := range pathsToRender {
+		var pathColor color.Color = color.Black
+		if p.Color == "red" {
+			pathColor = color.RGBA{R: 255, A: 255}
+		} else if p.Color == "blue" {
+			pathColor = color.RGBA{B: 255, A: 255}
+		} else if p.Color == "green" {
+			pathColor = color.RGBA{G: 255, A: 255}
+		}
+		
+		if len(p.Points) > 1 {
+			for i := 0; i < len(p.Points)-1; i++ {
+				segment := canvas.NewLine(pathColor)
+				segment.StrokeWidth = p.Stroke
+				segment.Position1 = fyne.NewPos(
+					p.Points[i].X+r.board.panX,
+					p.Points[i].Y+r.board.panY,
+				)
+				segment.Position2 = fyne.NewPos(
+					p.Points[i+1].X+r.board.panX,
+					p.Points[i+1].Y+r.board.panY,
+				)
+				objects = append(objects, segment)
+			}
+		}
+	}
+	return objects
 }
-func (r *boardWidgetRenderer) Refresh() { canvas.Refresh(r.board) }
+
+func (r *boardWidgetRenderer) Refresh() {
+	canvas.Refresh(r.board)
+}
+
 func (b *BoardWidget) MouseIn(*desktop.MouseEvent) {}
 func (b *BoardWidget) MouseOut() {}
 func (b *BoardWidget) MouseMoved(*desktop.MouseEvent) {}
 func (b *BoardWidget) DragEnd() {}
 func (r *boardWidgetRenderer) Destroy() {}
-func (r *boardWidgetRenderer) Layout(size fyne.Size) { r.background.Resize(size) }
-func (r *boardWidgetRenderer) MinSize() fyne.Size { return fyne.NewSize(300, 300) }
-func (b *BoardWidget) Scrolled(e *fyne.ScrollEvent) { b.panX += e.Scrolled.DX; b.panY += e.Scrolled.DY; b.Refresh() }
+
+func (r *boardWidgetRenderer) Layout(size fyne.Size) {
+	r.background.Resize(size)
+}
+
+func (r *boardWidgetRenderer) MinSize() fyne.Size {
+	return fyne.NewSize(300, 300)
+}
+
+func (b *BoardWidget) Scrolled(e *fyne.ScrollEvent) {
+	b.panX += e.Scrolled.DX
+	b.panY += e.Scrolled.DY
+	b.Refresh()
+}
